@@ -258,9 +258,15 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
 
         mScanner.setConfig(Symbol.NONE, Config.ENABLE, 0);
         if (barCodeTypes != null) {
-            for (String code : barCodeTypes) {
-                BarcodeFormat format = parseBarCodeString(code);
-                if (format != null) {
+            if (!barCodeTypes.isEmpty()) {
+                for (String code : barCodeTypes) {
+                    BarcodeFormat format = parseBarCodeString(code);
+                    if (format != null) {
+                        mScanner.setConfig(format.getId(), Config.ENABLE, 1);
+                    }
+                }
+            } else {
+                for (BarcodeFormat format : BarcodeFormat.ALL_FORMATS) {
                     mScanner.setConfig(format.getId(), Config.ENABLE, 1);
                 }
             }
