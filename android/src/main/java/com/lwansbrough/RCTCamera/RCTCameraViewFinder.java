@@ -11,24 +11,24 @@ import android.hardware.Camera;
 import android.view.MotionEvent;
 import android.view.TextureView;
 import android.os.AsyncTask;
+import android.text.TextUtils;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactContext;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.EnumMap;
 import java.util.EnumSet;
 
-import com.google.zxing.BarcodeFormat;
-import com.google.zxing.BinaryBitmap;
-import com.google.zxing.DecodeHintType;
-import com.google.zxing.MultiFormatReader;
-import com.google.zxing.PlanarYUVLuminanceSource;
-import com.google.zxing.Result;
-import com.google.zxing.common.HybridBinarizer;
+import net.sourceforge.zbar.Config;
+import net.sourceforge.zbar.Image;
+import net.sourceforge.zbar.ImageScanner;
+import net.sourceforge.zbar.Symbol;
+import net.sourceforge.zbar.SymbolSet;
 
 class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceTextureListener, Camera.PreviewCallback {
     private int _cameraType;
@@ -44,8 +44,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
     // concurrency lock for barcode scanner to avoid flooding the runtime
     public static volatile boolean barcodeScannerTaskLock = false;
 
-    // reader instance for the barcode scanner
-    private final MultiFormatReader _multiFormatReader = new MultiFormatReader();
+    private ImageScanner mScanner;
 
     public RCTCameraViewFinder(Context context, int type) {
         super(context);
@@ -215,40 +214,32 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
      * Additionally supports [codabar, maxicode, rss14, rssexpanded, upca, upceanextension]
      */
     private BarcodeFormat parseBarCodeString(String c) {
-        if ("aztec".equals(c)) {
-            return BarcodeFormat.AZTEC;
-        } else if ("ean13".equals(c)) {
-            return BarcodeFormat.EAN_13;
+        if ("ean13".equals(c)) {
+            return BarcodeFormat.EAN13;
         } else if ("ean8".equals(c)) {
-            return BarcodeFormat.EAN_8;
+            return BarcodeFormat.EAN8;
         } else if ("qr".equals(c)) {
-            return BarcodeFormat.QR_CODE;
+            return BarcodeFormat.QRCODE;
         } else if ("pdf417".equals(c)) {
-            return BarcodeFormat.PDF_417;
+            return BarcodeFormat.PDF417;
         } else if ("upce".equals(c)) {
-            return BarcodeFormat.UPC_E;
-        } else if ("datamatrix".equals(c)) {
-            return BarcodeFormat.DATA_MATRIX;
+            return BarcodeFormat.UPCE;
         } else if ("code39".equals(c)) {
-            return BarcodeFormat.CODE_39;
+            return BarcodeFormat.CODE39;
         } else if ("code93".equals(c)) {
-            return BarcodeFormat.CODE_93;
+            return BarcodeFormat.CODE93;
         } else if ("interleaved2of5".equals(c)) {
-            return BarcodeFormat.ITF;
+            return BarcodeFormat.I25;
         } else if ("codabar".equals(c)) {
             return BarcodeFormat.CODABAR;
         } else if ("code128".equals(c)) {
-            return BarcodeFormat.CODE_128;
-        } else if ("maxicode".equals(c)) {
-            return BarcodeFormat.MAXICODE;
+            return BarcodeFormat.CODE128;
         } else if ("rss14".equals(c)) {
-            return BarcodeFormat.RSS_14;
+            return BarcodeFormat.DATABAR;
         } else if ("rssexpanded".equals(c)) {
-            return BarcodeFormat.RSS_EXPANDED;
+            return BarcodeFormat.DATABAR_EXP;
         } else if ("upca".equals(c)) {
-            return BarcodeFormat.UPC_A;
-        } else if ("upceanextension".equals(c)) {
-            return BarcodeFormat.UPC_EAN_EXTENSION;
+            return BarcodeFormat.UPCA;
         } else {
             android.util.Log.v("RCTCamera", "Unsupported code.. [" + c + "]");
             return null;
@@ -259,20 +250,25 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
      * Initialize the barcode decoder.
      */
     private void initBarcodeReader(List<String> barCodeTypes) {
-        EnumMap<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
-        EnumSet<BarcodeFormat> decodeFormats = EnumSet.noneOf(BarcodeFormat.class);
+        List<BarcodeFormat> mFormats;
 
+        mScanner = new ImageScanner();
+        mScanner.setConfig(0, Config.X_DENSITY, 3);
+        mScanner.setConfig(0, Config.Y_DENSITY, 3);
+
+        mScanner.setConfig(Symbol.NONE, Config.ENABLE, 0);
         if (barCodeTypes != null) {
             for (String code : barCodeTypes) {
                 BarcodeFormat format = parseBarCodeString(code);
                 if (format != null) {
-                    decodeFormats.add(format);
+                    mScanner.setConfig(format.getId(), Config.ENABLE, 1);
                 }
             }
+        } else {
+            for (BarcodeFormat format : BarcodeFormat.ALL_FORMATS) {
+                mScanner.setConfig(format.getId(), Config.ENABLE, 1);
+            }
         }
-
-        hints.put(DecodeHintType.POSSIBLE_FORMATS, decodeFormats);
-        _multiFormatReader.setHints(hints);
     }
 
     /**
@@ -309,7 +305,7 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             int width = size.width;
             int height = size.height;
 
-            // rotate for zxing if orientation is portrait
+            // rotate if orientation is portrait
             if (RCTCamera.getInstance().getActualDeviceOrientation() == 0) {
                 byte[] rotated = new byte[imageData.length];
                 for (int y = 0; y < height; y++) {
@@ -323,20 +319,38 @@ class RCTCameraViewFinder extends TextureView implements TextureView.SurfaceText
             }
 
             try {
-                PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(imageData, width, height, 0, 0, width, height, false);
-                BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-                Result result = _multiFormatReader.decodeWithState(bitmap);
+                Image barcode = new Image(width, height, "Y800");
+                barcode.setData(imageData);
 
-                ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
-                WritableMap event = Arguments.createMap();
-                event.putString("data", result.getText());
-                event.putString("type", result.getBarcodeFormat().toString());
-                reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit("CameraBarCodeReadAndroid", event);
+                int result = mScanner.scanImage(barcode);
+
+                if (result != 0) {
+                    SymbolSet syms = mScanner.getResults();
+                    for (Symbol sym : syms) {
+                        // In order to retreive QR codes containing null bytes we need to
+                        // use getDataBytes() rather than getData() which uses C strings.
+                        // Weirdly ZBar transforms all data to UTF-8, even the data returned
+                        // by getDataBytes() so we have to decode it as UTF-8.
+                        String symData;
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                            symData = new String(sym.getDataBytes(), StandardCharsets.UTF_8);
+                        } else {
+                            symData = sym.getData();
+                        }
+                        if (!TextUtils.isEmpty(symData)) {
+                            ReactContext reactContext = RCTCameraModule.getReactContextSingleton();
+                            WritableMap event = Arguments.createMap();
+                            event.putString("data", symData);
+                            event.putString("type", (BarcodeFormat.getFormatById(sym.getType())).getName());
+                            reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit("CameraBarCodeReadAndroid", event);
+                            break;
+                        }
+                    }
+                }
 
             } catch (Throwable t) {
                 // meh
             } finally {
-                _multiFormatReader.reset();
                 RCTCameraViewFinder.barcodeScannerTaskLock = false;
                 return null;
             }
